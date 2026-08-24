@@ -131,21 +131,37 @@ app = FastAPI(
 )
 
 
+def extract_row_val(row, key="cnt") -> int:
+    if not row:
+        return 0
+    if isinstance(row, dict):
+        return row.get(key) or row.get("count") or (list(row.values())[0] if row else 0)
+    if hasattr(row, "keys") and key in row.keys():
+        return row[key]
+    try:
+        return row[0]
+    except Exception:
+        return 0
+
+
 @app.on_event("startup")
 def auto_seed_database_on_boot():
-    cfg, db = get_config_and_db()
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) as cnt FROM homes")
-        total_homes = cursor.fetchone()["cnt"]
-        if total_homes == 0:
-            seed_path = "data/cqc_carehomes_seed.csv"
-            if not os.path.exists(seed_path) and os.path.exists("Carehomes CQC list.csv"):
-                seed_path = "Carehomes CQC list.csv"
-            if os.path.exists(seed_path):
-                logger.info(f"Empty database detected on boot. Auto-seeding care homes dataset from {seed_path}...")
-                stage0 = Stage0Import(cfg, db)
-                stage0.run_import(seed_path)
+    try:
+        cfg, db = get_config_and_db()
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM homes")
+            total_homes = extract_row_val(cursor.fetchone())
+            if total_homes == 0:
+                seed_path = "data/cqc_carehomes_seed.csv"
+                if not os.path.exists(seed_path) and os.path.exists("Carehomes CQC list.csv"):
+                    seed_path = "Carehomes CQC list.csv"
+                if os.path.exists(seed_path):
+                    logger.info(f"Empty database detected on boot. Auto-seeding care homes dataset from {seed_path}...")
+                    stage0 = Stage0Import(cfg, db)
+                    stage0.run_import(seed_path)
+    except Exception as e:
+        logger.error(f"Error in auto_seed_database_on_boot: {e}")
 
 
 @app.get("/api/stats")
@@ -154,35 +170,35 @@ def get_stats():
     with db.get_connection() as conn:
         cursor = conn.cursor()
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM homes")
-        total_homes = cursor.fetchone()["cnt"]
+        db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM homes")
+        total_homes = extract_row_val(cursor.fetchone())
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM homes WHERE stage_status = ?", (StageStatus.PENDING_DISCOVERY,))
-        pending_discovery = cursor.fetchone()["cnt"]
+        db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM homes WHERE stage_status = ?", (StageStatus.PENDING_DISCOVERY,))
+        pending_discovery = extract_row_val(cursor.fetchone())
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM homes WHERE website_status = 'ACCEPTED' OR website_status = 'MANUAL_APPROVED'")
-        websites_accepted = cursor.fetchone()["cnt"]
+        db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM homes WHERE website_status = 'ACCEPTED' OR website_status = 'MANUAL_APPROVED'")
+        websites_accepted = extract_row_val(cursor.fetchone())
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM homes WHERE website_status = 'NEEDS_MANUAL_REVIEW' OR stage_status = 'MANUAL_REVIEW_NEEDED'")
-        websites_review_needed = cursor.fetchone()["cnt"]
+        db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM homes WHERE website_status = 'NEEDS_MANUAL_REVIEW' OR stage_status = 'MANUAL_REVIEW_NEEDED'")
+        websites_review_needed = extract_row_val(cursor.fetchone())
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM homes WHERE stage_status = ?", (StageStatus.PENDING_EXTRACTION,))
-        pending_extraction = cursor.fetchone()["cnt"]
+        db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM homes WHERE stage_status = ?", (StageStatus.PENDING_EXTRACTION,))
+        pending_extraction = extract_row_val(cursor.fetchone())
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM contacts")
-        contacts_extracted = cursor.fetchone()["cnt"]
+        db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM contacts")
+        contacts_extracted = extract_row_val(cursor.fetchone())
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM email_drafts WHERE approved = 0 AND status = 'DRAFT'")
-        pending_drafts = cursor.fetchone()["cnt"]
+        db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM email_drafts WHERE approved = 0 AND status = 'DRAFT'")
+        pending_drafts = extract_row_val(cursor.fetchone())
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM email_drafts WHERE approved = 1 AND status = 'QUEUED'")
-        approved_drafts = cursor.fetchone()["cnt"]
+        db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM email_drafts WHERE approved = 1 AND status = 'QUEUED'")
+        approved_drafts = extract_row_val(cursor.fetchone())
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM email_drafts WHERE status = 'SENT'")
-        sent_emails = cursor.fetchone()["cnt"]
+        db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM email_drafts WHERE status = 'SENT'")
+        sent_emails = extract_row_val(cursor.fetchone())
 
-        cursor.execute("SELECT COUNT(*) as cnt FROM suppression_list")
-        suppressed_emails = cursor.fetchone()["cnt"]
+        db.execute_sql(cursor, "SELECT COUNT(*) as cnt FROM suppression_list")
+        suppressed_emails = extract_row_val(cursor.fetchone())
 
         today_s1 = db.get_daily_count("Stage1_Discovery")
         today_s2 = db.get_daily_count("Stage2_Extraction")
@@ -233,14 +249,14 @@ def get_homes(
             params.append(status)
 
         # Count total matching
-        count_query = f"SELECT COUNT(*) as cnt FROM ({query})"
-        cursor.execute(count_query, params)
-        total_count = cursor.fetchone()["cnt"]
+        count_query = f"SELECT COUNT(*) as cnt FROM ({query}) sub"
+        db.execute_sql(cursor, count_query, params)
+        total_count = extract_row_val(cursor.fetchone())
 
         query += " ORDER BY id ASC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
-        cursor.execute(query, params)
+        db.execute_sql(cursor, query, params)
         rows = [dict(r) for r in cursor.fetchall()]
 
     return {
@@ -331,7 +347,7 @@ def get_suppression_list():
     cfg, db = get_config_and_db()
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM suppression_list ORDER BY added_at DESC")
+        db.execute_sql(cursor, "SELECT * FROM suppression_list ORDER BY added_at DESC")
         rows = [dict(r) for r in cursor.fetchall()]
     return {"suppression": rows}
 
@@ -348,7 +364,7 @@ def get_audit_logs(limit: int = 50):
     cfg, db = get_config_and_db()
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
+        db.execute_sql(cursor, """
             SELECT l.*, h.name as home_name
             FROM audit_logs l
             LEFT JOIN homes h ON l.home_id = h.id

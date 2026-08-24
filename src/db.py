@@ -159,7 +159,8 @@ class DatabaseManager:
     def log_audit(self, stage: str, action: str, message: str, home_id: Optional[int] = None):
         timestamp = datetime.now(timezone.utc).isoformat()
         with self.get_connection() as conn:
-            conn.execute(
+            cursor = conn.cursor()
+            self.execute_sql(cursor, 
                 "INSERT INTO audit_logs (home_id, stage, action, message, timestamp) VALUES (?, ?, ?, ?, ?)",
                 (home_id, stage, action, message, timestamp)
             )
@@ -169,18 +170,20 @@ class DatabaseManager:
         today_str = date.today().isoformat()
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
+            self.execute_sql(cursor, 
                 "INSERT INTO daily_processing (process_date, stage, count) VALUES (?, ?, 1) "
                 "ON CONFLICT(process_date, stage) DO UPDATE SET count = count + 1",
                 (today_str, stage)
             )
             conn.commit()
-            cursor.execute(
+            self.execute_sql(cursor, 
                 "SELECT count FROM daily_processing WHERE process_date = ? AND stage = ?",
                 (today_str, stage)
             )
             row = cursor.fetchone()
-            return row["count"] if row else 1
+            if not row:
+                return 1
+            return row["count"] if isinstance(row, dict) else row[0]
 
     def get_crawler_daily_count(self) -> int:
         """
@@ -189,7 +192,7 @@ class DatabaseManager:
         today = date.today().isoformat()
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
+            self.execute_sql(cursor, 
                 "SELECT SUM(processed_count) as total FROM daily_audit WHERE date = ? AND stage_name IN ('Stage1_Discovery', 'Stage2_Extraction')",
                 (today,)
             )
@@ -203,12 +206,14 @@ class DatabaseManager:
         today_str = date.today().isoformat()
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
+            self.execute_sql(cursor, 
                 "SELECT count FROM daily_processing WHERE process_date = ? AND stage = ?",
                 (today_str, stage)
             )
             row = cursor.fetchone()
-            return row["count"] if row else 0
+            if not row:
+                return 0
+            return row["count"] if isinstance(row, dict) else row[0]
 
     def insert_care_homes(self, homes: List[CareHome]) -> Tuple[int, int]:
         """Inserts care homes, ignoring duplicates based on dedupe_hash. Returns (inserted, skipped)."""

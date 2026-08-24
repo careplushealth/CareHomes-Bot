@@ -11,10 +11,27 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")
 
 
+def sanitize_db_url(url: Optional[str]) -> str:
+    if not url or not url.strip():
+        return ""
+    url = url.strip()
+    if url.startswith("psql "):
+        url = url[5:].strip()
+    url = url.strip("'\"")
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    if "&channel_binding=" in url:
+        url = url.split("&channel_binding=")[0]
+    elif "?channel_binding=" in url:
+        url = url.split("?channel_binding=")[0]
+    return url
+
+
 class DatabaseManager:
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self.is_postgres = bool(DATABASE_URL and DATABASE_URL.strip())
+        self.clean_url = sanitize_db_url(DATABASE_URL)
+        self.is_postgres = bool(self.clean_url)
         if self.is_postgres:
             logger.info("Connecting to Neon PostgreSQL cloud database...")
         else:
@@ -26,9 +43,7 @@ class DatabaseManager:
         if self.is_postgres:
             import psycopg2
             import psycopg2.extras
-            # Fix postgres:// -> postgresql:// for SQLAlchemy/psycopg2 compatibility
-            conn_url = DATABASE_URL.replace("postgres://", "postgresql://", 1) if DATABASE_URL.startswith("postgres://") else DATABASE_URL
-            conn = psycopg2.connect(conn_url, cursor_factory=psycopg2.extras.RealDictCursor)
+            conn = psycopg2.connect(self.clean_url, cursor_factory=psycopg2.extras.RealDictCursor)
             return conn
         else:
             conn = sqlite3.connect(self.db_path)

@@ -2,9 +2,11 @@ services:
   - type: web
     name: carehomes-bot
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
       - key: ADMIN_USER
         value: admin
       - key: ADMIN_PASSWORD
@@ -12,6 +14,8 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: RESEND_API_KEY
+        sync: false
+      - key: DATABASE_URL
         sync: false
       - key: SECRET_KEY
         generateValue: true

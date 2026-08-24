@@ -21,7 +21,7 @@ class ReviewQueueManager:
     def get_websites_needing_review(self) -> List[Dict[str, Any]]:
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            self.db.execute_sql(cursor, """
                 SELECT id, name, postcode, address, discovered_website, website_confidence, website_status
                 FROM homes
                 WHERE website_status = 'NEEDS_MANUAL_REVIEW' OR stage_status = 'MANUAL_REVIEW_NEEDED'
@@ -34,7 +34,7 @@ class ReviewQueueManager:
         # Find home
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM homes WHERE id = ?", (home_id,))
+            self.db.execute_sql(cursor, "SELECT * FROM homes WHERE id = ?", (home_id,))
             row = cursor.fetchone()
             if not row:
                 raise ValueError(f"Care Home #{home_id} not found.")
@@ -56,7 +56,8 @@ class ReviewQueueManager:
 
     def reject_website(self, home_id: int):
         with self.db.get_connection() as conn:
-            conn.execute("""
+            cursor = conn.cursor()
+            self.db.execute_sql(cursor, """
                 UPDATE homes SET website_status = 'REJECTED', stage_status = 'SKIPPED' WHERE id = ?
             """, (home_id,))
             conn.commit()

@@ -118,7 +118,7 @@ class Stage4Sending(BaseStage):
             query += " ORDER BY d.id ASC"
             if max_items:
                 query += f" LIMIT {int(max_items)}"
-            cursor.execute(query)
+            self.db.execute_sql(cursor, query)
             queued_drafts = [dict(r) for r in cursor.fetchall()]
 
         logger.info(f"Found {len(queued_drafts)} approved email drafts ready for sending.")
@@ -138,7 +138,8 @@ class Stage4Sending(BaseStage):
             if self.db.is_email_suppressed(recipient):
                 logger.warning(f"Draft #{draft['id']} recipient {recipient} is on suppression list. Suppressing.")
                 with self.db.get_connection() as conn:
-                    conn.execute("UPDATE email_drafts SET status = 'SUPPRESSED' WHERE id = ?", (draft["id"],))
+                    cursor = conn.cursor()
+                    self.db.execute_sql(cursor, "UPDATE email_drafts SET status = 'SUPPRESSED' WHERE id = ?", (draft["id"],))
                     conn.commit()
                 suppressed_count += 1
                 continue
@@ -158,7 +159,8 @@ class Stage4Sending(BaseStage):
             else:
                 failed_count += 1
                 with self.db.get_connection() as conn:
-                    conn.execute("UPDATE email_drafts SET status = 'FAILED' WHERE id = ?", (draft["id"],))
+                    cursor = conn.cursor()
+                    self.db.execute_sql(cursor, "UPDATE email_drafts SET status = 'FAILED' WHERE id = ?", (draft["id"],))
                     conn.commit()
                 audit_msg = f"Failed to send email draft #{draft['id']} to {recipient}"
                 self.db.log_audit("Stage4_Sending", "SEND_FAILED", audit_msg, home_id=draft["home_id"])

@@ -393,25 +393,52 @@ def run_pipeline_task(stage: str, limit: Optional[int]):
 
         results = {}
 
-        if stage in ("1", "crawler", "all"):
-            c_limit = limit or cfg.pipeline.crawling_daily_cap
-            s1 = Stage1Discovery(cfg, db)
-            results["stage1"] = s1.run(max_items=c_limit)
+        if stage == "crawler":
+            daily_cap = cfg.pipeline.crawling_daily_cap
+            processed_today = db.get_crawler_daily_count()
+            remaining_cap = limit if limit else max(0, daily_cap - processed_today)
 
-        if stage in ("2", "crawler", "all"):
-            c_limit = limit or cfg.pipeline.crawling_daily_cap
-            s2 = Stage2Extraction(cfg, db)
-            results["stage2"] = s2.run(max_items=c_limit)
+            if remaining_cap <= 0:
+                msg = f"Crawler daily cap of {daily_cap} items reached for today ({processed_today}/{daily_cap} processed). Execution paused."
+                logger.warning(msg)
+                db.log_audit("Crawler", "CAP_REACHED", msg)
+                results["status"] = "CAP_REACHED"
+                results["processed_today"] = processed_today
+            else:
+                s1 = Stage1Discovery(cfg, db)
+                res1 = s1.run(max_items=remaining_cap)
+                results["stage1"] = res1
 
-        if stage in ("3", "outreach", "all"):
-            s_limit = limit or cfg.pipeline.sending_daily_cap
+                s1_done = res1.get("processed", 0)
+                remaining_s2 = max(0, remaining_cap - s1_done)
+                if remaining_s2 > 0:
+                    s2 = Stage2Extraction(cfg, db)
+                    results["stage2"] = s2.run(max_items=remaining_s2)
+
+        elif stage == "outreach":
+            daily_cap = cfg.pipeline.sending_daily_cap
+            s_limit = limit or daily_cap
             s3 = Stage3Personalise(cfg, db)
             results["stage3"] = s3.run(max_items=s_limit)
-
-        if stage in ("4", "outreach"):
-            s_limit = limit or cfg.pipeline.sending_daily_cap
-            s4 = Stage4Sending(cfg, db, transport_mode="dry_run")
+            s4 = Stage4Sending(cfg, db, transport_mode="resend")
             results["stage4"] = s4.run(max_items=s_limit)
+
+        else:
+            if stage in ("1", "all"):
+                s1 = Stage1Discovery(cfg, db)
+                results["stage1"] = s1.run(max_items=limit or cfg.pipeline.crawling_daily_cap)
+
+            if stage in ("2", "all"):
+                s2 = Stage2Extraction(cfg, db)
+                results["stage2"] = s2.run(max_items=limit or cfg.pipeline.crawling_daily_cap)
+
+            if stage in ("3", "all"):
+                s3 = Stage3Personalise(cfg, db)
+                results["stage3"] = s3.run(max_items=limit or cfg.pipeline.sending_daily_cap)
+
+            if stage in ("4", "all"):
+                s4 = Stage4Sending(cfg, db, transport_mode="resend")
+                results["stage4"] = s4.run(max_items=limit or cfg.pipeline.sending_daily_cap)
 
         pipeline_task_status["last_result"] = results
         logger.info(f"Background pipeline run finished: {results}")
@@ -455,6 +482,49 @@ def export_drafts():
     output_path = "data/review_queue_export.csv"
     reviewer.export_drafts_to_csv(output_path)
     return FileResponse(output_path, media_type="text/csv", filename="email_drafts_review_queue.csv")
+
+
+@app.get("/api/directory")
+def get_directory(
+    q: Optional[str] = Query(None),
+    status: Optional[str] = Query("all"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0)
+):
+    cfg, db = get_config_and_db()
+    items, total = db.get_directory_carehomes(query_text=q, status_filter=status, limit=limit, offset=offset)
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+
+@app.get("/api/export/directory")
+def export_directory(
+    q: Optional[str] = Query(None),
+    status: Optional[str] = Query("all")
+):
+    import csv
+    cfg, db = get_config_and_db()
+    items, total = db.get_directory_carehomes(query_text=q, status_filter=status, limit=10000, offset=0)
+    output_path = "data/directory_export.csv"
+    os.makedirs("data", exist_ok=True)
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "ID", "CQC_ID", "Care_Home_Name", "Address", "Postcode",
+            "Website", "Website_Confidence", "Website_Status", "Stage_Status",
+            "General_Email", "Manager_Name", "Manager_Email", "Contact_Form_URL"
+        ])
+        for h in items:
+            writer.writerow([
+                h.get("id"), h.get("cqc_location_id"), h.get("name"), h.get("address"), h.get("postcode"),
+                h.get("website"), h.get("website_confidence"), h.get("website_status"), h.get("stage_status"),
+                h.get("general_email"), h.get("manager_name"), h.get("manager_email"), h.get("contact_form_url")
+            ])
+    return FileResponse(output_path, media_type="text/csv", filename="carehomes_directory_export.csv")
 
 
 @app.get("/api/export/unfound")
@@ -627,6 +697,9 @@ HTML_CONTENT = """<!DOCTYPE html>
             <nav class="flex items-center space-x-2 bg-slate-900/60 p-1.5 rounded-xl border border-slate-800">
                 <button onclick="switchTab('overview')" id="tab-overview" class="tab-btn px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white shadow-sm transition">
                     📊 Overview
+                </button>
+                <button onclick="switchTab('directory')" id="tab-directory" class="tab-btn px-4 py-2 text-sm font-medium rounded-lg text-slate-300 hover:text-white transition">
+                    🏢 Directory
                 </button>
                 <button onclick="switchTab('website-reviews')" id="tab-website-reviews" class="tab-btn px-4 py-2 text-sm font-medium rounded-lg text-slate-300 hover:text-white transition">
                     🔍 Website Reviews <span id="badge-websites-review" class="ml-1 px-2 py-0.5 text-xs bg-amber-500/20 text-amber-300 rounded-full font-semibold">0</span>
@@ -840,6 +913,76 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- TAB: CARE HOMES DIRECTORY -->
+        <div id="section-directory" class="tab-content hidden space-y-6">
+            <div class="glass-panel p-6 rounded-2xl shadow-xl space-y-6">
+                <div class="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+                    <div>
+                        <h2 class="text-xl font-bold text-white flex items-center space-x-2">
+                            <span>🏢 Care Homes Database Directory</span>
+                        </h2>
+                        <p class="text-xs text-slate-400">Search, filter & view full details for all care homes (website, phone, emails, match score & status)</p>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <a id="btn-export-directory" href="/api/export/directory" target="_blank" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold border border-slate-700 transition flex items-center space-x-2">
+                            <span>📥 Export CSV</span>
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Search & Filter Controls -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-xs font-medium text-slate-400 mb-1">Search Care Homes</label>
+                        <input type="text" id="directory-search-input" onkeyup="handleDirectorySearch()" placeholder="Search by name, postcode, address..." class="w-full px-4 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-slate-400 mb-1">Filter by Status</label>
+                        <select id="directory-status-filter" onchange="loadDirectory(0)" class="w-full px-4 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500 transition">
+                            <option value="all">All Care Homes</option>
+                            <option value="ACCEPTED_WEBSITES">Verified Websites Only</option>
+                            <option value="CONTACTS_EXTRACTED">Contacts / Emails Extracted</option>
+                            <option value="NEEDS_REVIEW">Needs Manual Review</option>
+                            <option value="UNFOUND">Unfound List</option>
+                            <option value="PENDING_DISCOVERY">Pending Website Discovery</option>
+                        </select>
+                    </div>
+                    <div class="flex items-end justify-between">
+                        <div class="text-xs text-slate-400">
+                            Showing <span id="dir-count-showing" class="font-bold text-white">0</span> of <span id="dir-count-total" class="font-bold text-indigo-400">0</span> homes
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Table -->
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs font-sans text-slate-300">
+                        <thead class="bg-slate-900/80 uppercase text-slate-400 border-b border-slate-800">
+                            <tr>
+                                <th class="p-3">ID</th>
+                                <th class="p-3">Care Home Name</th>
+                                <th class="p-3">Postcode & Address</th>
+                                <th class="p-3">Verified Website</th>
+                                <th class="p-3">Contact Email</th>
+                                <th class="p-3">Match Score</th>
+                                <th class="p-3">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="directory-table-body" class="divide-y divide-slate-800/50">
+                            <tr><td colspan="7" class="p-6 text-center text-slate-500">Loading care homes directory...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Pagination -->
+                <div class="flex items-center justify-between pt-4 border-t border-slate-800 text-xs">
+                    <button id="btn-dir-prev" onclick="changeDirectoryPage(-1)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg disabled:opacity-50 font-semibold transition">← Previous</button>
+                    <span id="dir-page-indicator" class="text-slate-400">Page 1</span>
+                    <button id="btn-dir-next" onclick="changeDirectoryPage(1)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg disabled:opacity-50 font-semibold transition">Next →</button>
+                </div>
+            </div>
+        </div>
+
         <!-- TAB 4: SUPPRESSION & PECR OPT-OUT -->
         <div id="section-suppression" class="tab-content hidden space-y-6">
             <div class="glass-panel p-6 rounded-2xl shadow-xl space-y-6">
@@ -979,6 +1122,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             }
 
             if (tabId === 'overview') loadStats();
+            if (tabId === 'directory') loadDirectory(0);
             if (tabId === 'website-reviews') loadWebsiteReviews();
             if (tabId === 'drafts') loadDrafts();
             if (tabId === 'unfound') loadUnfound();
@@ -1211,6 +1355,82 @@ HTML_CONTENT = """<!DOCTYPE html>
                 `).join('');
             } catch (err) {
                 console.error(err);
+            }
+        }
+
+        let directoryPage = 0;
+        const directoryLimit = 50;
+        let searchTimeout = null;
+
+        function handleDirectorySearch() {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                loadDirectory(0);
+            }, 300);
+        }
+
+        function changeDirectoryPage(delta) {
+            loadDirectory(directoryPage + delta);
+        }
+
+        async function loadDirectory(page = 0) {
+            if (page < 0) return;
+            directoryPage = page;
+            const offset = directoryPage * directoryLimit;
+            const q = document.getElementById('directory-search-input').value.trim();
+            const status = document.getElementById('directory-status-filter').value;
+
+            const exportBtn = document.getElementById('btn-export-directory');
+            if (exportBtn) exportBtn.href = `/api/export/directory?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`;
+
+            try {
+                const res = await fetch(`/api/directory?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}&limit=${directoryLimit}&offset=${offset}`);
+                const data = await res.json();
+                const tbody = document.getElementById('directory-table-body');
+
+                document.getElementById('dir-count-showing').innerText = data.items.length.toLocaleString();
+                document.getElementById('dir-count-total').innerText = data.total.toLocaleString();
+                const badge = document.getElementById('badge-directory-count');
+                if (badge) badge.innerText = data.total.toLocaleString();
+
+                const totalPages = Math.ceil(data.total / directoryLimit) || 1;
+                document.getElementById('dir-page-indicator').innerText = `Page ${directoryPage + 1} of ${totalPages}`;
+                document.getElementById('btn-dir-prev').disabled = directoryPage === 0;
+                document.getElementById('btn-dir-next').disabled = directoryPage + 1 >= totalPages;
+
+                if (!data.items.length) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="p-6 text-center text-slate-500">No care homes match your search criteria.</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.items.map(item => `
+                    <tr class="hover:bg-slate-900/40">
+                        <td class="p-3 text-slate-500 font-mono">#${item.id}</td>
+                        <td class="p-3 font-semibold text-white">${item.name}</td>
+                        <td class="p-3 text-slate-400">
+                            <div>${item.address || 'Address not listed'}</div>
+                            <div class="font-mono text-cyan-400 text-[11px] font-semibold">${item.postcode}</div>
+                        </td>
+                        <td class="p-3">
+                            ${item.website ? `<a href="${item.website}" target="_blank" class="text-cyan-400 underline hover:text-cyan-300 font-mono text-xs">${item.website}</a>` : '<span class="text-slate-600 font-medium">None</span>'}
+                        </td>
+                        <td class="p-3 font-mono text-xs">
+                            ${item.primary_email ? `<span class="text-indigo-300">${item.primary_email}</span>` : (item.contact_form_url ? `<a href="${item.contact_form_url}" target="_blank" class="text-amber-400 underline">Contact Form</a>` : '<span class="text-slate-600">Pending</span>')}
+                        </td>
+                        <td class="p-3">
+                            <span class="px-2 py-0.5 rounded text-[11px] font-semibold ${item.website_confidence >= 0.65 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'}">
+                                ${(item.website_confidence * 100).toFixed(0)}%
+                            </span>
+                        </td>
+                        <td class="p-3">
+                            <span class="px-2 py-0.5 rounded text-[11px] font-semibold ${item.website_status === 'ACCEPTED' ? 'bg-emerald-500/20 text-emerald-300' : (item.website_status === 'NEEDS_MANUAL_REVIEW' ? 'bg-amber-500/20 text-amber-300' : 'bg-slate-800 text-slate-400')}">
+                                ${item.website_status || item.stage_status}
+                            </span>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                console.error("Error loading directory:", err);
             }
         }
 

@@ -1,20 +1,54 @@
 import sqlite3
 import os
+import logging
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, date, timezone
 from src.models import CareHome, ContactDetails, EmailDraft, StageStatus
+
+logger = logging.getLogger(__name__)
+
+# Check for Neon / Cloud PostgreSQL database connection string
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL")
 
 
 class DatabaseManager:
     def __init__(self, db_path: str):
         self.db_path = db_path
-        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        self.is_postgres = bool(DATABASE_URL and DATABASE_URL.strip())
+        if self.is_postgres:
+            logger.info("Connecting to Neon PostgreSQL cloud database...")
+        else:
+            os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+            logger.info(f"Connecting to local SQLite database at {db_path}...")
         self.init_db()
 
-    def get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def get_connection(self):
+        if self.is_postgres:
+            import psycopg2
+            import psycopg2.extras
+            # Fix postgres:// -> postgresql:// for SQLAlchemy/psycopg2 compatibility
+            conn_url = DATABASE_URL.replace("postgres://", "postgresql://", 1) if DATABASE_URL.startswith("postgres://") else DATABASE_URL
+            conn = psycopg2.connect(conn_url, cursor_factory=psycopg2.extras.RealDictCursor)
+            return conn
+        else:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            return conn
+
+    def execute_sql(self, cursor, query: str, params=()):
+        if self.is_postgres:
+            query = query.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+            query = query.replace("REAL", "DOUBLE PRECISION")
+            query = query.replace("?", "%s")
+            if "INSERT OR IGNORE INTO homes" in query:
+                query = query.replace("INSERT OR IGNORE INTO homes", "INSERT INTO homes").replace("VALUES", "ON CONFLICT (dedupe_hash) DO NOTHING VALUES")
+            elif "INSERT OR IGNORE INTO suppression_list" in query:
+                query = query.replace("INSERT OR IGNORE INTO suppression_list", "INSERT INTO suppression_list").replace("VALUES", "ON CONFLICT (email) DO NOTHING VALUES")
+            elif "INSERT OR REPLACE INTO" in query:
+                query = query.replace("INSERT OR REPLACE INTO", "INSERT INTO")
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query, params)
 
     def init_db(self):
         with self.get_connection() as conn:
@@ -131,6 +165,23 @@ class DatabaseManager:
             )
             row = cursor.fetchone()
             return row["count"] if row else 1
+
+    def get_crawler_daily_count(self) -> int:
+        """
+        Returns total cumulative items processed today across Stage1_Discovery and Stage2_Extraction combined.
+        """
+        today = date.today().isoformat()
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT SUM(processed_count) as total FROM daily_audit WHERE date = ? AND stage_name IN ('Stage1_Discovery', 'Stage2_Extraction')",
+                (today,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return 0
+            val = row["total"] if isinstance(row, dict) else row[0]
+            return val or 0
 
     def get_daily_count(self, stage: str) -> int:
         today_str = date.today().isoformat()
@@ -332,6 +383,69 @@ class DatabaseManager:
             if row:
                 conn.execute("UPDATE homes SET stage_status = 'SENT', updated_at = ? WHERE id = ?", (now, row["home_id"]))
             conn.commit()
+
+    def get_directory_carehomes(
+        self,
+        query_text: Optional[str] = None,
+        status_filter: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Returns paginated care homes with full details (name, address, postcode, website, phone, email, status)
+        and matching total count for directory search and filtering.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            sql_base = """
+                FROM homes h
+                LEFT JOIN contacts c ON h.id = c.home_id
+            """
+            conditions = []
+            params = []
+
+            if query_text and query_text.strip():
+                q = f"%{query_text.strip().lower()}%"
+                conditions.append("(LOWER(h.name) LIKE ? OR LOWER(h.postcode) LIKE ? OR LOWER(h.address) LIKE ?)")
+                params.extend([q, q, q])
+
+            if status_filter and status_filter.lower() != "all":
+                sf = status_filter.upper()
+                if sf == "ACCEPTED_WEBSITES":
+                    conditions.append("h.website_status = 'ACCEPTED'")
+                elif sf == "CONTACTS_EXTRACTED":
+                    conditions.append("(c.general_email IS NOT NULL OR c.manager_email IS NOT NULL)")
+                elif sf == "NEEDS_REVIEW":
+                    conditions.append("h.website_status = 'NEEDS_MANUAL_REVIEW'")
+                elif sf == "UNFOUND":
+                    conditions.append("h.website_status IN ('NEEDS_MANUAL_REVIEW', 'REJECTED', 'NO_RESULT')")
+                else:
+                    conditions.append("h.stage_status = ?")
+                    params.append(sf)
+
+            where_clause = ""
+            if conditions:
+                where_clause = " WHERE " + " AND ".join(conditions)
+
+            # Count total matching rows
+            count_sql = "SELECT COUNT(*) as total " + sql_base + where_clause
+            cursor.execute(count_sql, params)
+            row = cursor.fetchone()
+            total_count = row["total"] if isinstance(row, dict) else row[0]
+
+            # Fetch paginated rows
+            data_sql = """
+                SELECT h.id, h.cqc_location_id, h.name, h.address, h.postcode,
+                       COALESCE(h.discovered_website, h.original_website) as website,
+                       h.website_confidence, h.website_status, h.stage_status,
+                       c.general_email, c.manager_name, c.manager_email, c.contact_form_url,
+                       COALESCE(c.manager_email, c.general_email) as primary_email
+                """ + sql_base + where_clause + " ORDER BY h.id ASC LIMIT ? OFFSET ?"
+            
+            data_params = list(params) + [limit, offset]
+            cursor.execute(data_sql, data_params)
+            rows = [dict(r) for r in cursor.fetchall()]
+            return rows, total_count
 
     def get_unfound_carehomes(self) -> List[Dict[str, Any]]:
         """

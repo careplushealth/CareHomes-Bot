@@ -131,6 +131,23 @@ app = FastAPI(
 )
 
 
+@app.on_event("startup")
+def auto_seed_database_on_boot():
+    cfg, db = get_config_and_db()
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as cnt FROM homes")
+        total_homes = cursor.fetchone()["cnt"]
+        if total_homes == 0:
+            seed_path = "data/cqc_carehomes_seed.csv"
+            if not os.path.exists(seed_path) and os.path.exists("Carehomes CQC list.csv"):
+                seed_path = "Carehomes CQC list.csv"
+            if os.path.exists(seed_path):
+                logger.info(f"Empty database detected on boot. Auto-seeding care homes dataset from {seed_path}...")
+                stage0 = Stage0Import(cfg, db)
+                stage0.run_import(seed_path)
+
+
 @app.get("/api/stats")
 def get_stats():
     cfg, db = get_config_and_db()

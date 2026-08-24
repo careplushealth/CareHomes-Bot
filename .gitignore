@@ -13,6 +13,7 @@ data/carehomes_pipeline.db
 # Output CSVs & Review Exports
 data/*.csv
 *.csv
+!data/cqc_carehomes_seed.csv
 
 # Python Virtual Environment & Caches
 venv/

@@ -1,0 +1,53 @@
+database_path: "data/carehomes_pipeline.db"
+
+pipeline:
+  crawling_daily_cap: 500       # Scrape 500 care homes per day
+  sending_daily_cap: 30          # Send 30 outreach emails per day
+  domain_request_delay_min: 3.0
+  domain_request_delay_max: 8.0
+  request_timeout_seconds: 10
+  user_agent: "UKCareHomeOutreachBot/1.0 (+https://healthtest-solutions.co.uk/bot-info)"
+
+search_api:
+  provider: "duckduckgo" # options: "duckduckgo", "google", "bing", "mock"
+  google_api_key: ""
+  google_cse_id: ""
+  bing_api_key: ""
+  gemini_api_key: ""    # Loaded securely from GEMINI_API_KEY env var
+  confidence_threshold: 0.65
+
+sender_info:
+  org_name: "HealthTest Solutions UK"
+  sender_name: "Outreach Operations"
+  reply_to: "covid-testing@healthtest-solutions.co.uk"
+  unsubscribe_base_url: "https://healthtest-solutions.co.uk/optout"
+
+smtp_settings:
+  mode: "resend"        # Options: "resend", "smtp", "dry_run", "mock"
+  resend_api_key: ""    # Loaded securely from RESEND_API_KEY env var
+  resend_from_email: "onboarding@resend.dev"
+  host: "smtp.gmail.com"
+  port: 587
+  user: ""
+  password: ""
+
+email_template:
+  subject: "NHS-Partnered Resident Covid Testing Support for {care_home_name}"
+  body_template: |
+    Dear {salutation},
+
+    I am writing to you on behalf of {sender_org} regarding our NHS-partnered resident Covid-19 testing service tailored for UK care homes.
+
+    As part of our partnership with the NHS, we provide high-throughput, compliant Covid testing workflows and quick-result logistics designed to keep residents and care staff safe with minimal administrative overhead for your team at {care_home_name}.
+
+    If you would be open to learning how our service operates alongside your current safety protocol, please reply directly to this email ({reply_to}) or call our support desk.
+
+    Kind regards,
+
+    {sender_name}
+    {sender_org}
+    Contact: {reply_to}
+
+    ---
+    Opt-Out / Unsubscribe Notice (PECR Compliant):
+    This email was sent as a direct B2B enquiry to {care_home_name}. If you wish to opt out of future communications regarding this NHS-partnered testing service, please click here: {unsubscribe_url} or reply to this email with "UNSUBSCRIBE".

@@ -1,0 +1,32 @@
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+
+# Database & SQLite files
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/carehomes_pipeline.db
+
+# Output CSVs & Review Exports
+data/*.csv
+*.csv
+
+# Python Virtual Environment & Caches
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Operating System & IDE Files
+.DS_Store
+.vscode/
+.idea/
+
+# Application Logs
+*.log
+logs/

@@ -40,22 +40,23 @@ class DatabaseManager:
             query = query.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
             query = query.replace("REAL", "DOUBLE PRECISION")
             query = query.replace("?", "%s")
-            if "INSERT OR IGNORE INTO homes" in query:
-                query = query.replace("INSERT OR IGNORE INTO homes", "INSERT INTO homes").replace("VALUES", "ON CONFLICT (dedupe_hash) DO NOTHING VALUES")
-            elif "INSERT OR IGNORE INTO suppression_list" in query:
-                query = query.replace("INSERT OR IGNORE INTO suppression_list", "INSERT INTO suppression_list").replace("VALUES", "ON CONFLICT (email) DO NOTHING VALUES")
-            elif "INSERT OR REPLACE INTO" in query:
-                query = query.replace("INSERT OR REPLACE INTO", "INSERT INTO")
-            cursor.execute(query, params)
-        else:
-            cursor.execute(query, params)
+            query = query.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+            query = query.replace("INSERT OR REPLACE INTO", "INSERT INTO")
+            if "INSERT INTO homes" in query and "ON CONFLICT" not in query:
+                query = query.rstrip() + " ON CONFLICT (dedupe_hash) DO NOTHING"
+            elif "INSERT INTO suppression_list" in query and "ON CONFLICT" not in query:
+                query = query.rstrip() + " ON CONFLICT (email) DO NOTHING"
+            elif "INSERT INTO contacts" in query and "ON CONFLICT" in query:
+                query = query.replace("ON CONFLICT(home_id)", "ON CONFLICT (home_id)")
+        cursor.execute(query, params)
+        return cursor
 
     def init_db(self):
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
             # Homes table
-            cursor.execute("""
+            self.execute_sql(cursor, """
                 CREATE TABLE IF NOT EXISTS homes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     cqc_location_id TEXT,
@@ -74,7 +75,7 @@ class DatabaseManager:
             """)
 
             # Contacts table
-            cursor.execute("""
+            self.execute_sql(cursor, """
                 CREATE TABLE IF NOT EXISTS contacts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     home_id INTEGER UNIQUE NOT NULL,
@@ -89,7 +90,7 @@ class DatabaseManager:
             """)
 
             # Email Drafts table
-            cursor.execute("""
+            self.execute_sql(cursor, """
                 CREATE TABLE IF NOT EXISTS email_drafts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     home_id INTEGER NOT NULL,
@@ -106,7 +107,7 @@ class DatabaseManager:
             """)
 
             # Suppression List table
-            cursor.execute("""
+            self.execute_sql(cursor, """
                 CREATE TABLE IF NOT EXISTS suppression_list (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     email TEXT UNIQUE NOT NULL,
@@ -116,7 +117,7 @@ class DatabaseManager:
             """)
 
             # Audit Logs table
-            cursor.execute("""
+            self.execute_sql(cursor, """
                 CREATE TABLE IF NOT EXISTS audit_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     home_id INTEGER,
@@ -128,7 +129,7 @@ class DatabaseManager:
             """)
 
             # Daily usage counter table for rate-limiting checkpointing
-            cursor.execute("""
+            self.execute_sql(cursor, """
                 CREATE TABLE IF NOT EXISTS daily_processing (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     process_date TEXT NOT NULL,
@@ -204,7 +205,7 @@ class DatabaseManager:
             cursor = conn.cursor()
             for h in homes:
                 try:
-                    cursor.execute("""
+                    self.execute_sql(cursor, """
                         INSERT INTO homes (
                             cqc_location_id, name, address, postcode, original_website,
                             discovered_website, website_confidence, website_status,
@@ -216,8 +217,11 @@ class DatabaseManager:
                         h.stage_status, h.dedupe_hash, now, now
                     ))
                     inserted += 1
-                except sqlite3.IntegrityError:
-                    skipped += 1
+                except Exception as e:
+                    if "duplicate key" in str(e).lower() or "unique" in str(e).lower():
+                        skipped += 1
+                    else:
+                        skipped += 1
             conn.commit()
         return inserted, skipped
 
@@ -229,7 +233,7 @@ class DatabaseManager:
             if limit is not None:
                 query += " LIMIT ?"
                 params.append(limit)
-            cursor.execute(query, params)
+            self.execute_sql(cursor, query, params)
             rows = cursor.fetchall()
             return [self._row_to_care_home(r) for r in rows]
 
@@ -237,7 +241,8 @@ class DatabaseManager:
                             website_status: str, next_stage: str):
         now = datetime.now(timezone.utc).isoformat()
         with self.get_connection() as conn:
-            conn.execute("""
+            cursor = conn.cursor()
+            self.execute_sql(cursor, """
                 UPDATE homes SET
                     discovered_website = ?,
                     website_confidence = ?,
@@ -251,7 +256,8 @@ class DatabaseManager:
     def update_home_stage(self, home_id: int, next_stage: str):
         now = datetime.now(timezone.utc).isoformat()
         with self.get_connection() as conn:
-            conn.execute(
+            cursor = conn.cursor()
+            self.execute_sql(cursor, 
                 "UPDATE homes SET stage_status = ?, updated_at = ? WHERE id = ?",
                 (next_stage, now, home_id)
             )
@@ -260,7 +266,8 @@ class DatabaseManager:
     def save_contact_details(self, contact: ContactDetails):
         now = datetime.now(timezone.utc).isoformat()
         with self.get_connection() as conn:
-            conn.execute("""
+            cursor = conn.cursor()
+            self.execute_sql(cursor, """
                 INSERT INTO contacts (
                     home_id, general_email, contact_form_url, manager_name, manager_email, source_page_url, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -280,7 +287,7 @@ class DatabaseManager:
     def get_contact_for_home(self, home_id: int) -> Optional[ContactDetails]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM contacts WHERE home_id = ?", (home_id,))
+            self.execute_sql(cursor, "SELECT * FROM contacts WHERE home_id = ?", (home_id,))
             row = cursor.fetchone()
             if not row:
                 return None
@@ -299,7 +306,7 @@ class DatabaseManager:
         now = datetime.now(timezone.utc).isoformat()
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            self.execute_sql(cursor, """
                 INSERT INTO email_drafts (
                     home_id, recipient_email, recipient_name, subject, body_text, approved, status, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -308,14 +315,14 @@ class DatabaseManager:
                 draft.body_text, draft.approved, draft.status, now
             ))
             conn.commit()
-            return cursor.lastrowid
+            return getattr(cursor, "lastrowid", 1)
 
     def is_email_suppressed(self, email: str) -> bool:
         if not email:
             return False
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM suppression_list WHERE LOWER(email) = LOWER(?)", (email.strip(),))
+            self.execute_sql(cursor, "SELECT 1 FROM suppression_list WHERE LOWER(email) = LOWER(?)", (email.strip(),))
             return cursor.fetchone() is not None
 
     def reset_discovered_websites(self) -> int:
@@ -325,7 +332,7 @@ class DatabaseManager:
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            self.execute_sql(cursor, """
                 UPDATE homes
                 SET discovered_website = NULL,
                     website_confidence = 0.0,
@@ -340,7 +347,8 @@ class DatabaseManager:
     def add_suppression(self, email: str, reason: str = "unsubscribe"):
         now = datetime.now(timezone.utc).isoformat()
         with self.get_connection() as conn:
-            conn.execute(
+            cursor = conn.cursor()
+            self.execute_sql(cursor, 
                 "INSERT OR IGNORE INTO suppression_list (email, reason, added_at) VALUES (?, ?, ?)",
                 (email.strip().lower(), reason, now)
             )
@@ -360,28 +368,30 @@ class DatabaseManager:
             if limit:
                 query += " LIMIT ?"
                 params.append(limit)
-            cursor.execute(query, params)
+            self.execute_sql(cursor, query, params)
             return [dict(r) for r in cursor.fetchall()]
 
     def approve_draft(self, draft_id: int):
         with self.get_connection() as conn:
-            conn.execute("UPDATE email_drafts SET approved = 1, status = 'QUEUED' WHERE id = ?", (draft_id,))
+            cursor = conn.cursor()
+            self.execute_sql(cursor, "UPDATE email_drafts SET approved = 1, status = 'QUEUED' WHERE id = ?", (draft_id,))
             conn.commit()
 
     def reject_draft(self, draft_id: int):
         with self.get_connection() as conn:
-            conn.execute("UPDATE email_drafts SET approved = -1, status = 'REJECTED' WHERE id = ?", (draft_id,))
+            cursor = conn.cursor()
+            self.execute_sql(cursor, "UPDATE email_drafts SET approved = -1, status = 'REJECTED' WHERE id = ?", (draft_id,))
             conn.commit()
 
     def mark_draft_sent(self, draft_id: int):
         now = datetime.now(timezone.utc).isoformat()
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT home_id FROM email_drafts WHERE id = ?", (draft_id,))
+            self.execute_sql(cursor, "SELECT home_id FROM email_drafts WHERE id = ?", (draft_id,))
             row = cursor.fetchone()
-            conn.execute("UPDATE email_drafts SET status = 'SENT', sent_at = ? WHERE id = ?", (now, draft_id))
+            self.execute_sql(cursor, "UPDATE email_drafts SET status = 'SENT', sent_at = ? WHERE id = ?", (now, draft_id))
             if row:
-                conn.execute("UPDATE homes SET stage_status = 'SENT', updated_at = ? WHERE id = ?", (now, row["home_id"]))
+                self.execute_sql(cursor, "UPDATE homes SET stage_status = 'SENT', updated_at = ? WHERE id = ?", (now, row["home_id"]))
             conn.commit()
 
     def get_directory_carehomes(
@@ -429,7 +439,7 @@ class DatabaseManager:
 
             # Count total matching rows
             count_sql = "SELECT COUNT(*) as total " + sql_base + where_clause
-            cursor.execute(count_sql, params)
+            self.execute_sql(cursor, count_sql, params)
             row = cursor.fetchone()
             total_count = row["total"] if isinstance(row, dict) else row[0]
 
@@ -443,7 +453,7 @@ class DatabaseManager:
                 """ + sql_base + where_clause + " ORDER BY h.id ASC LIMIT ? OFFSET ?"
             
             data_params = list(params) + [limit, offset]
-            cursor.execute(data_sql, data_params)
+            self.execute_sql(cursor, data_sql, data_params)
             rows = [dict(r) for r in cursor.fetchall()]
             return rows, total_count
 
@@ -466,7 +476,7 @@ class DatabaseManager:
                    OR (h.stage_status = 'PENDING_PERSONALISATION' AND (c.general_email IS NULL AND c.manager_email IS NULL))
                 ORDER BY h.id ASC
             """
-            cursor.execute(query)
+            self.execute_sql(cursor, query)
             return [dict(r) for r in cursor.fetchall()]
 
     def _row_to_care_home(self, row: sqlite3.Row) -> CareHome:
